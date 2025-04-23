@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 
 import kubernetes
@@ -16,6 +17,8 @@ ObjectMeta_attribute_map = {
     value: key for key, value in V1ObjectMeta.attribute_map.items()
 }
 
+logger = logging.getLogger(__name__)
+
 
 def to_camel_case(snake_str):
     components = snake_str.split("_")
@@ -25,11 +28,50 @@ def to_camel_case(snake_str):
 
 
 def to_snake_case(camel_str):
+    """Convert camelCase to snake_case.
+
+    :param camel_str: String in camelCase format
+    :type camel_str: str
+    :returns: String in snake_case format
+    :rtype: str
+    """
     # Use regex to find uppercase letters that are not at the beginning of the string
     # and replace them with an underscore followed by the lowercase letter.
     # Also handles the case of consecutive uppercase letters.
     s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", camel_str)
     return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+
+
+def safe_to_snake_case(camel_str, cls=None, context=""):
+    """Convert camelCase to snake_case with validation against class fields.
+
+    :param camel_str: String in camelCase format
+    :param cls: Optional class to validate field existence
+    :param context: Context for error message
+    :returns: String in snake_case format
+    :raises: AttributeError if the converted field doesn't exist on cls
+    """
+    snake_str = to_snake_case(camel_str)
+
+    # If class is provided, validate the field exists
+    if cls is not None:
+        # Get all attributes of the class
+        if hasattr(cls, "__annotations__"):
+            # For dataclasses, check annotations
+            if snake_str not in cls.__annotations__:
+                raise AttributeError(
+                    f"Field '{camel_str}' (converted to '{snake_str}') "
+                    f"does not exist on {cls.__name__} {context}"
+                )
+        elif hasattr(cls, "__slots__"):
+            # For classes with __slots__
+            if snake_str not in cls.__slots__:
+                raise AttributeError(
+                    f"Field '{camel_str}' (converted to '{snake_str}') "
+                    f"does not exist on {cls.__name__} {context}"
+                )
+
+    return snake_str
 
 
 class KubeResourceBase:
@@ -65,9 +107,9 @@ class KubeResourceBase:
     @classmethod
     def apischema_yaml(cls):
         """YAML Serialized OpenAPIV3 schema for the cls."""
-        return yaml.dump(cls.apischema(), Dumper=yaml.Dumper)
-        # yaml_schema = yaml.load(cls.apischema_json(), Loader=yaml.Loader)
-        # return yaml.dump(yaml_schema, Dumper=yaml.Dumper)
+        # return yaml.dump(cls.apischema(), Dumper=yaml.Dumper)
+        yaml_schema = yaml.load(cls.apischema_json(), Loader=yaml.Loader)
+        return yaml.dump(yaml_schema, Dumper=yaml.Dumper)
 
     @classmethod
     def singular(cls):
@@ -119,22 +161,7 @@ class KubeResourceBase:
                         "storage": True,
                         "schema": {
                             "openAPIV3Schema": {
-                                "type": "object",
-                                "properties": {
-                                    "spec": cls.apischema(),
-                                    # The status field's schema is provided by a class method
-                                    # if available, otherwise it's an empty object schema.
-                                    "status": getattr(
-                                        cls,
-                                        "status_schema",
-                                        lambda: {
-                                            "type": "object"
-                                        },  # Default to object schema for status
-                                    )(),
-                                },
-                                # Kubernetes recommends disabling additionalProperties for structural schemas
-                                # unless you explicitly need to allow unknown fields.
-                                "additionalProperties": False,
+                                **cls.apischema(),
                             }
                         },
                         "subresources": {
@@ -161,7 +188,7 @@ class KubeResourceBase:
         """
         # Directly dump the dictionary to YAML.
         return yaml.dump(
-            cls.crd_schema_dict(),
+            yaml.load(json.dumps(cls.crd_schema_dict()), Loader=yaml.Loader),
             Dumper=yaml.Dumper,
         )
 
@@ -186,24 +213,41 @@ class KubeResourceBase:
         if actual_kind != cls.__name__:
             raise ValueError(f"Invalid kind: {actual_kind} (expected {cls.__name__})")
 
+        # Process metadata
         metadata = json_data.get("metadata", {})
         inputs = {ObjectMeta_attribute_map.get(k, k): v for k, v in metadata.items()}
         meta = V1ObjectMeta(**inputs)
 
-        # spec_data = json_data.get('spec', {})
-        spec_data = {to_snake_case(k): v for k, v in json_data.get("spec", {}).items()}
+        # Process spec
+        spec_data = {
+            safe_to_snake_case(k, cls, "in spec"): v
+            for k, v in json_data.get("spec", {}).items()
+        }
         ins = cls(**spec_data)
 
         # Attach raw JSON and parsed metadata
         ins.json = json_data
         ins.metadata = meta
 
-        # Optionally attach status if your class supports it
-        if hasattr(ins, "status") and "status" in json_data:
+        # Process status if present
+        if "status" in json_data:
             status_data = {
                 to_snake_case(k): v for k, v in json_data.get("status", {}).items()
             }
-            ins.status = status_data
+
+            # Different handling strategies depending on what's available:
+            # 1. If the instance has a status_class attribute, use it to instantiate status
+            if hasattr(cls, "status_class"):
+                ins.status = cls.status_class(**status_data)
+            # 2. If instance already has a status attribute, update it
+            elif hasattr(ins, "status"):
+                if isinstance(ins.status, dict):
+                    ins.status.update(status_data)
+                else:
+                    ins.status = status_data
+            # 3. Otherwise just attach the status dict
+            else:
+                ins.status = status_data
 
         return ins
 
@@ -217,6 +261,26 @@ class KubeResourceBase:
             trying to install a CRD that was already installed.
         :type exist_ok: bool
         """
+        # Check Kubernetes version compatibility
+        try:
+            version_api = kubernetes.client.VersionApi(k8s_client)
+            version_info = version_api.get_code()
+            k8s_version = version_info.git_version
+
+            version_match = re.search(r"v(\d+\.\d+)", k8s_version)
+            if version_match:
+                major_minor = float(version_match.group(1))
+                if major_minor < 1.16:
+                    logger.warning(
+                        f"Kubernetes version {k8s_version} may not fully support "
+                        f"apiextensions.k8s.io/v1 CRDs. Version 1.16+ is recommended."
+                    )
+            else:
+                logger.warning(f"Could not parse Kubernetes version: {k8s_version}")
+        except Exception as e:
+            logger.warning(f"Failed to check Kubernetes version: {str(e)}")
+
+        # Rest of the install method remains the same
         try:
             utils.create_from_yaml(
                 k8s_client,
@@ -230,18 +294,31 @@ class KubeResourceBase:
 
     @classmethod
     async def async_install(cls, k8s_client, exist_ok=True):
-        """Asynchronously install the CRD in Kubernetes.
-
-        :param k8s_client: Instantiated Kubernetes async API Client.
-        :type k8s_client: kubernetes_asyncio.client.api_client.ApiClient
-        :param exist_ok: If True, don't raise an error if the CRD already exists.
-        :type exist_ok: bool
-        """
-        from kubernetes_asyncio.client import ApiextensionsV1Api
+        """Asynchronously install the CRD in Kubernetes."""
+        from kubernetes_asyncio.client import ApiextensionsV1Api, VersionApi
         from kubernetes_asyncio.client.rest import ApiException
 
-        api = ApiextensionsV1Api(k8s_client)
+        # Check Kubernetes version compatibility
+        try:
+            version_api = VersionApi(k8s_client)
+            version_info = await version_api.get_code()
+            k8s_version = version_info.git_version
 
+            version_match = re.search(r"v(\d+\.\d+)", k8s_version)
+            if version_match:
+                major_minor = float(version_match.group(1))
+                if major_minor < 1.16:
+                    logger.warning(
+                        f"Kubernetes version {k8s_version} may not fully support "
+                        f"apiextensions.k8s.io/v1 CRDs. Version 1.16+ is recommended."
+                    )
+            else:
+                logger.warning(f"Could not parse Kubernetes version: {k8s_version}")
+        except Exception as e:
+            logger.warning(f"Failed to check Kubernetes version: {str(e)}")
+
+        # Rest of the async install method
+        api = ApiextensionsV1Api(k8s_client)
         crd_manifest = cls.crd_schema_dict()
 
         try:
@@ -250,6 +327,7 @@ class KubeResourceBase:
             if e.status == 409 and exist_ok:
                 # CRD already exists
                 return
+            logger.error(f"Failed to create CRD: {e}", exc_info=True)
             raise
 
     @classmethod
@@ -287,35 +365,60 @@ class KubeResourceBase:
             obj = cls.from_json(event["object"])
             yield (event["type"], obj)
 
-    def serialize(self, name_prefix=None):
-        """Serialize the CR as a JSON suitable for POST'ing to K8s API."""
+    def serialize(self, name=None, metadata=None):
+        """Serialize the CR as a JSON suitable for POST'ing to K8s API.
+
+        :param name: Optional name for the resource. If None, a name will be generated.
+        :type name: str
+        :param metadata: Optional dict of metadata to include (will be merged with default metadata).
+        :type metadata: dict
+        :returns: Dict representing the Kubernetes custom resource.
+        :rtype: dict
+        """
         use_camel = getattr(self, "__camel_case__", True)
-        if name_prefix is None:
-            name_prefix = self.__class__.__name__.lower()
+
+        # Generate a default name if one isn't provided
+        if name is None:
+            # name = (self.__class__.__name__.lower() + "-" + str(id(self))[-8:]).lower()
+            name = self.generate_resource_name(prefix=self.singular())
+
+        # Start with basic required metadata
+        resource_metadata = {"name": name}
+
+        # Merge any provided metadata
+        if metadata and isinstance(metadata, dict):
+            resource_metadata.update(metadata)
 
         return {
             "kind": self.__class__.__name__,
             "apiVersion": f"{self.__group__}/{self.__version__}",
             "spec": serialize(self, aliaser=to_camel_case if use_camel else None),
-            "metadata": {
-                "name": (name_prefix + str(id(self))).lower(),
-            },
+            "metadata": resource_metadata,
+            "status": getattr(self, "status", None),
         }
 
-    def save(self, k8s_client, namespace="default"):
-        """Save the instance of this class as a K8s custom resource."""
+    def save(self, k8s_client, namespace="default", name=None, metadata=None):
+        """Save the instance of this class as a K8s custom resource.
+
+        :param k8s_client: Kubernetes API client
+        :param namespace: Namespace to create the resource in
+        :param name: Optional name for the resource
+        :param metadata: Optional additional metadata
+        """
         api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
         resp = api_instance.create_namespaced_custom_object(
             group=self.__group__,
             namespace=namespace,
             version=self.__version__,
             plural=self.plural(),
-            body=self.serialize(),
+            body=self.serialize(name=name, metadata=metadata),
         )
         return resp
 
-    async def async_save(self, k8s_client, namespace="default"):
-        """Save the instance of this class as a K8s custom resource."""
+    async def async_save(
+        self, k8s_client, namespace="default", name=None, metadata=None
+    ):
+        """Save the instance of this class as a K8s custom resource asynchronously."""
         from kubernetes_asyncio import client
 
         api_instance = client.CustomObjectsApi(k8s_client)
@@ -324,6 +427,133 @@ class KubeResourceBase:
             namespace=namespace,
             version=self.__version__,
             plural=self.plural(),
-            body=self.serialize(),
+            body=self.serialize(name=name, metadata=metadata),
         )
         return resp
+
+    def generate_resource_name(self, prefix=None, include_hash=True):
+        """Generate a deterministic name for this resource.
+
+        :param prefix: Optional prefix for the name. Defaults to lowercase class name.
+        :param include_hash: Whether to include a hash of object contents for uniqueness.
+        :returns: A valid Kubernetes resource name.
+        """
+        if prefix is None:
+            prefix = self.__class__.__name__.lower()
+
+        # Ensure prefix is a valid DNS subdomain name
+        prefix = re.sub(r"[^a-z0-9-]", "-", prefix.lower())
+        prefix = re.sub(r"-+", "-", prefix)  # Replace multiple dashes with single dash
+        prefix = prefix.strip("-")  # Remove leading/trailing dashes
+
+        if not include_hash:
+            return prefix
+
+        # Generate a deterministic hash based on the serialized spec
+        import hashlib
+
+        use_camel = getattr(self, "__camel_case__", True)
+        spec_json = json.dumps(
+            serialize(self, aliaser=to_camel_case if use_camel else None),
+            sort_keys=True,
+        )
+        hash_suffix = hashlib.md5(spec_json.encode()).hexdigest()[:8]
+
+        # Combine prefix with hash, ensuring name isn't too long (k8s limit is 253 chars)
+        max_prefix_len = 240 - len(hash_suffix) - 1  # leave room for dash and hash
+        if len(prefix) > max_prefix_len:
+            prefix = prefix[:max_prefix_len]
+
+        return f"{prefix}-{hash_suffix}"
+
+    def update_status(self, k8s_client, namespace="default"):
+        """Update only the status subresource of this custom resource.
+
+        :param k8s_client: Kubernetes API client
+        :param namespace: Namespace where the resource exists
+        """
+        if not hasattr(self, "status"):
+            raise ValueError(
+                "Cannot update status: no status field exists on this object"
+            )
+
+        if not hasattr(self, "metadata") or not hasattr(self.metadata, "name"):
+            raise ValueError(
+                "Cannot update status: resource must have a name in metadata"
+            )
+
+        api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
+
+        # Get status data, handling different status types
+        if hasattr(self.status, "serialize"):
+            status_data = self.status.serialize()
+        elif hasattr(self.status, "__dict__"):
+            use_camel = getattr(self, "__camel_case__", True)
+            status_data = {
+                to_camel_case(k) if use_camel else k: v
+                for k, v in self.status.__dict__.items()
+                if not k.startswith("_")
+            }
+        else:
+            # Assume it's a dict or dict-like
+            use_camel = getattr(self, "__camel_case__", True)
+            status_data = {
+                to_camel_case(k) if use_camel else k: v for k, v in self.status.items()
+            }
+
+        # Create the status patch
+        status_obj = {"status": status_data}
+
+        return api_instance.patch_namespaced_custom_object_status(
+            group=self.__group__,
+            version=self.__version__,
+            namespace=namespace,
+            plural=self.plural(),
+            name=self.metadata.name,
+            body=status_obj,
+        )
+
+    async def async_update_status(self, k8s_client, namespace="default"):
+        """Update only the status subresource of this custom resource asynchronously."""
+        from kubernetes_asyncio import client
+
+        if not hasattr(self, "status"):
+            raise ValueError(
+                "Cannot update status: no status field exists on this object"
+            )
+
+        if not hasattr(self, "metadata") or not hasattr(self.metadata, "name"):
+            raise ValueError(
+                "Cannot update status: resource must have a name in metadata"
+            )
+
+        api_instance = client.CustomObjectsApi(k8s_client)
+
+        # Get status data, handling different status types
+        if hasattr(self.status, "serialize"):
+            status_data = self.status.serialize()
+        elif hasattr(self.status, "__dict__"):
+            use_camel = getattr(self, "__camel_case__", True)
+            status_data = {
+                to_camel_case(k) if use_camel else k: v
+                for k, v in self.status.__dict__.items()
+                if not k.startswith("_")
+            }
+        else:
+            # Assume it's a dict or dict-like
+            use_camel = getattr(self, "__camel_case__", True)
+            status_data = {
+                to_camel_case(k) if use_camel else k: v for k, v in self.status.items()
+            }
+
+        # Create the status patch
+        status_obj = {"status": status_data}
+
+        return await api_instance.patch_namespaced_custom_object_status(
+            group=self.__group__,
+            version=self.__version__,
+            namespace=namespace,
+            plural=self.plural(),
+            name=self.metadata.name,
+            body=status_obj,
+        )
