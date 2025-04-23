@@ -9,6 +9,9 @@ from apischema.json_schema import deserialization_schema
 from kubernetes import utils
 from kubernetes.client.models.v1_object_meta import V1ObjectMeta
 
+from kubernetes import config, client as k8s_sync_client
+from kubernetes_asyncio import config as async_config, client as k8s_async_client
+
 # ObjectMeta_attribute_map is simply the reverse of the
 # V1ObjectMeta.attribute_map , which is a mapping from python attribute to json
 # key while this is the opposite from json key to python attribute so that we
@@ -72,6 +75,26 @@ def safe_to_snake_case(camel_str, cls=None, context=""):
                 )
 
     return snake_str
+
+
+def get_k8s_client(provided=None):
+    if provided:
+        return provided
+    try:
+        config.load_incluster_config()
+    except config.ConfigException:
+        config.load_kube_config()
+    return k8s_sync_client.ApiClient()
+
+
+async def get_k8s_async_client(provided=None):
+    if provided:
+        return provided
+    try:
+        await async_config.load_incluster_config()
+    except async_config.ConfigException:
+        await async_config.load_kube_config()
+    return k8s_async_client.ApiClient()
 
 
 class KubeResourceBase:
@@ -252,7 +275,7 @@ class KubeResourceBase:
         return ins
 
     @classmethod
-    def install(cls, k8s_client, exist_ok=True):
+    def install(cls, k8s_client=None, exist_ok=True):
         """Install the CRD in Kubernetes.
 
         :param k8s_client: Instantiated Kubernetes API Client.
@@ -262,6 +285,8 @@ class KubeResourceBase:
         :type exist_ok: bool
         """
         # Check Kubernetes version compatibility
+        k8s_client = get_k8s_client(k8s_client)
+
         try:
             version_api = kubernetes.client.VersionApi(k8s_client)
             version_info = version_api.get_code()
@@ -293,11 +318,12 @@ class KubeResourceBase:
             raise
 
     @classmethod
-    async def async_install(cls, k8s_client, exist_ok=True):
+    async def async_install(cls, k8s_client=None, exist_ok=True):
         """Asynchronously install the CRD in Kubernetes."""
         from kubernetes_asyncio.client import ApiextensionsV1Api, VersionApi
         from kubernetes_asyncio.client.rest import ApiException
 
+        k8s_client = get_k8s_async_client(k8s_client)
         # Check Kubernetes version compatibility
         try:
             version_api = VersionApi(k8s_client)
@@ -331,9 +357,10 @@ class KubeResourceBase:
             raise
 
     @classmethod
-    def watch(cls, client):
+    def watch(cls, k8s_client=None):
         """List and watch the changes in the Resource in Cluster."""
-        api_instance = kubernetes.client.CustomObjectsApi(client)
+        k8s_client = get_k8s_client(k8s_client)
+        api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
         watch = kubernetes.watch.Watch()
         for event in watch.stream(
             func=api_instance.list_cluster_custom_object,
@@ -348,10 +375,11 @@ class KubeResourceBase:
             yield (event["type"], obj)
 
     @classmethod
-    async def async_watch(cls, k8s_client):
+    async def async_watch(cls, k8s_client=None):
         """Similar to watch, but uses async Kubernetes client for aio."""
         from kubernetes_asyncio import client, watch
 
+        k8s_client = get_k8s_async_client(k8s_client)
         api_instance = client.CustomObjectsApi(k8s_client)
         watch = watch.Watch()
         stream = watch.stream(
@@ -397,7 +425,7 @@ class KubeResourceBase:
             "status": getattr(self, "status", None),
         }
 
-    def save(self, k8s_client, namespace="default", name=None, metadata=None):
+    def save(self, k8s_client=None, namespace="default", name=None, metadata=None):
         """Save the instance of this class as a K8s custom resource.
 
         :param k8s_client: Kubernetes API client
@@ -405,6 +433,7 @@ class KubeResourceBase:
         :param name: Optional name for the resource
         :param metadata: Optional additional metadata
         """
+        k8s_client = get_k8s_client(k8s_client)
         api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
         resp = api_instance.create_namespaced_custom_object(
             group=self.__group__,
@@ -416,11 +445,12 @@ class KubeResourceBase:
         return resp
 
     async def async_save(
-        self, k8s_client, namespace="default", name=None, metadata=None
+        self, k8s_client=None, namespace="default", name=None, metadata=None
     ):
         """Save the instance of this class as a K8s custom resource asynchronously."""
         from kubernetes_asyncio import client
 
+        k8s_client = get_k8s_async_client(k8s_client)
         api_instance = client.CustomObjectsApi(k8s_client)
         resp = await api_instance.create_namespaced_custom_object(
             group=self.__group__,
@@ -466,7 +496,7 @@ class KubeResourceBase:
 
         return f"{prefix}-{hash_suffix}"
 
-    def update_status(self, k8s_client, namespace="default"):
+    def update_status(self, k8s_client=None, namespace="default"):
         """Update only the status subresource of this custom resource.
 
         :param k8s_client: Kubernetes API client
@@ -482,6 +512,7 @@ class KubeResourceBase:
                 "Cannot update status: resource must have a name in metadata"
             )
 
+        k8s_client = get_k8s_client(k8s_client)
         api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
 
         # Get status data, handling different status types
@@ -513,7 +544,7 @@ class KubeResourceBase:
             body=status_obj,
         )
 
-    async def async_update_status(self, k8s_client, namespace="default"):
+    async def async_update_status(self, k8s_client=None, namespace="default"):
         """Update only the status subresource of this custom resource asynchronously."""
         from kubernetes_asyncio import client
 
@@ -527,6 +558,7 @@ class KubeResourceBase:
                 "Cannot update status: resource must have a name in metadata"
             )
 
+        k8s_client = get_k8s_async_client(k8s_client)
         api_instance = client.CustomObjectsApi(k8s_client)
 
         # Get status data, handling different status types
