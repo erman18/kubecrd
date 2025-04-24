@@ -77,7 +77,7 @@ def safe_to_snake_case(camel_str, cls=None, context=""):
     return snake_str
 
 
-def get_k8s_client(provided=None):
+def get_k8s_client(provided=None) -> k8s_sync_client.ApiClient:
     if provided:
         return provided
     try:
@@ -87,7 +87,7 @@ def get_k8s_client(provided=None):
     return k8s_sync_client.ApiClient()
 
 
-async def get_k8s_async_client(provided=None):
+async def get_k8s_async_client(provided=None) -> k8s_async_client.ApiClient:
     if provided:
         return provided
     try:
@@ -323,7 +323,7 @@ class KubeResourceBase:
         from kubernetes_asyncio.client import ApiextensionsV1Api, VersionApi
         from kubernetes_asyncio.client.rest import ApiException
 
-        k8s_client = get_k8s_async_client(k8s_client)
+        k8s_client = await get_k8s_async_client(k8s_client)
         # Check Kubernetes version compatibility
         try:
             version_api = VersionApi(k8s_client)
@@ -379,7 +379,7 @@ class KubeResourceBase:
         """Similar to watch, but uses async Kubernetes client for aio."""
         from kubernetes_asyncio import client, watch
 
-        k8s_client = get_k8s_async_client(k8s_client)
+        k8s_client = await get_k8s_async_client(k8s_client)
         api_instance = client.CustomObjectsApi(k8s_client)
         watch = watch.Watch()
         stream = watch.stream(
@@ -450,7 +450,7 @@ class KubeResourceBase:
         """Save the instance of this class as a K8s custom resource asynchronously."""
         from kubernetes_asyncio import client
 
-        k8s_client = get_k8s_async_client(k8s_client)
+        k8s_client = await get_k8s_async_client(k8s_client)
         api_instance = client.CustomObjectsApi(k8s_client)
         resp = await api_instance.create_namespaced_custom_object(
             group=self.__group__,
@@ -558,7 +558,7 @@ class KubeResourceBase:
                 "Cannot update status: resource must have a name in metadata"
             )
 
-        k8s_client = get_k8s_async_client(k8s_client)
+        k8s_client = await get_k8s_async_client(k8s_client)
         api_instance = client.CustomObjectsApi(k8s_client)
 
         # Get status data, handling different status types
