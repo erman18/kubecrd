@@ -424,7 +424,7 @@ class KubeResourceBase:
                 self, aliaser=to_camel_case if use_camel else None
             ),
             "metadata": resource_metadata,
-            "status": getattr(self, "status", None),
+            # "status": getattr(self, "status", None),
         }
 
     def save(self, k8s_client=None, namespace="default", name=None, metadata=None):
