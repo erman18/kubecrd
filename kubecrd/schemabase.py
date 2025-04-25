@@ -4,7 +4,7 @@ import re
 
 import kubernetes
 import yaml
-from apischema import serialize
+from apischema import serialize as apischema_serialize
 from apischema.json_schema import deserialization_schema
 from kubernetes import utils
 from kubernetes.client.models.v1_object_meta import V1ObjectMeta
@@ -420,7 +420,9 @@ class KubeResourceBase:
         return {
             "kind": self.__class__.__name__,
             "apiVersion": f"{self.__group__}/{self.__version__}",
-            "spec": serialize(self, aliaser=to_camel_case if use_camel else None),
+            "spec": apischema_serialize(
+                self, aliaser=to_camel_case if use_camel else None
+            ),
             "metadata": resource_metadata,
             "status": getattr(self, "status", None),
         }
@@ -484,7 +486,7 @@ class KubeResourceBase:
 
         use_camel = getattr(self, "__camel_case__", True)
         spec_json = json.dumps(
-            serialize(self, aliaser=to_camel_case if use_camel else None),
+            apischema_serialize(self, aliaser=to_camel_case if use_camel else None),
             sort_keys=True,
         )
         hash_suffix = hashlib.md5(spec_json.encode()).hexdigest()[:8]
@@ -523,7 +525,7 @@ class KubeResourceBase:
             status_data = {
                 to_camel_case(k) if use_camel else k: v
                 for k, v in self.status.__dict__.items()
-                if not k.startswith("_")
+                if not k.startswith("_")  # Exclude private attributes
             }
         else:
             # Assume it's a dict or dict-like
