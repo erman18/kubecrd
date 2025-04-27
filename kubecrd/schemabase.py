@@ -59,12 +59,13 @@ def safe_to_snake_case(camel_str, cls=None, context=""):
     # If class is provided, validate the field exists
     if cls is not None:
         # Get all attributes of the class
-        if hasattr(cls, "__annotations__"):
+        if hasattr(cls, "__annotations__") and hasattr(cls.__annotations__, context):
             # For dataclasses, check annotations
-            if snake_str not in cls.__annotations__:
+            if snake_str not in cls.__annotations__.context:
                 raise AttributeError(
                     f"Field '{camel_str}' (converted to '{snake_str}') "
-                    f"does not exist on {cls.__name__} {context}"
+                    f"does not exist on {cls.__name__} in {context} "
+                    f"({cls.__annotations__.context})"
                 )
         elif hasattr(cls, "__slots__"):
             # For classes with __slots__
@@ -243,10 +244,10 @@ class KubeResourceBase:
 
         # Process spec
         spec_data = {
-            safe_to_snake_case(k, cls, "in spec"): v
+            safe_to_snake_case(k, cls, "spec"): v
             for k, v in json_data.get("spec", {}).items()
         }
-        ins = cls(**spec_data)
+        ins = cls(spec=spec_data)
 
         # Attach raw JSON and parsed metadata
         ins.json = json_data
@@ -420,9 +421,7 @@ class KubeResourceBase:
         return {
             "kind": self.__class__.__name__,
             "apiVersion": f"{self.__group__}/{self.__version__}",
-            "spec": apischema_serialize(
-                self, aliaser=to_camel_case if use_camel else None
-            ),
+            **apischema_serialize(self, aliaser=to_camel_case if use_camel else None),
             "metadata": resource_metadata,
             # "status": getattr(self, "status", None),
         }
@@ -437,12 +436,15 @@ class KubeResourceBase:
         """
         k8s_client = get_k8s_client(k8s_client)
         api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
+        body_data = self.serialize(name=name, metadata=metadata)
+        print(f"Creating {self.__class__.__name__} resource in namespace '{namespace}'")
+        print(f"Resource data: {body_data}")
         resp = api_instance.create_namespaced_custom_object(
             group=self.__group__,
             namespace=namespace,
             version=self.__version__,
             plural=self.plural(),
-            body=self.serialize(name=name, metadata=metadata),
+            body=body_data,
         )
         return resp
 
