@@ -1,16 +1,20 @@
 import json
 import logging
 import re
+from typing import Optional, Type, get_type_hints
 
 import kubernetes
 import yaml
-from apischema import serialize as apischema_serialize
+from apischema import (
+    serialize as apischema_serialize,
+    deserialize as apischema_deserialize,
+)
 from apischema.json_schema import deserialization_schema
-from kubernetes import utils
+from kubernetes import client as k8s_sync_client
+from kubernetes import config, utils
 from kubernetes.client.models.v1_object_meta import V1ObjectMeta
-
-from kubernetes import config, client as k8s_sync_client
-from kubernetes_asyncio import config as async_config, client as k8s_async_client
+from kubernetes_asyncio import client as k8s_async_client
+from kubernetes_asyncio import config as async_config
 
 # ObjectMeta_attribute_map is simply the reverse of the
 # V1ObjectMeta.attribute_map , which is a mapping from python attribute to json
@@ -76,6 +80,42 @@ def safe_to_snake_case(camel_str, cls=None, context=""):
                 )
 
     return snake_str
+
+
+def get_attr_class(parent_class: Type, attr_name: str) -> Optional[Type]:
+    """
+    Get the type annotation of a class attribute without instantiating the parent.
+
+    Args:
+        parent_class: The class to inspect.
+        attr_name: The attribute name to look up.
+
+    Returns:
+        The type class of the attribute or None if not found/typed.
+    """
+    try:
+        # Try to get fully resolved type hints
+        hints = get_type_hints(parent_class)
+        spec_type = hints.get(attr_name)
+        if spec_type is not None:
+            return spec_type
+
+        # Fallback to class annotations dictionary
+        if hasattr(parent_class, "__annotations__"):
+            annotation = parent_class.__annotations__.get(attr_name)
+            if isinstance(annotation, type):
+                return annotation
+
+        # Check if it's a class variable with a default value
+        if attr_name in vars(parent_class):
+            attr_value = getattr(parent_class, attr_name)
+            if attr_value is not None:
+                return type(attr_value)
+
+        return None
+    except (TypeError, AttributeError):
+        # Handle error cases where type resolution fails
+        return None
 
 
 def get_k8s_client(provided=None) -> k8s_sync_client.ApiClient:
@@ -217,14 +257,7 @@ class KubeResourceBase:
         )
 
     @classmethod
-    def from_json(cls, json_data: dict):
-        """Instantiate the class from JSON data fetched from Kubernetes.
-
-        :param json_data: The CR JSON returned from Kubernetes API.
-        :type json_data: Dict
-        :returns: Instantiated cls with the data from json_data.
-        :rtype: cls
-        """
+    def _validate_api_version_and_kind(cls, json_data):
         expected_api_version = f"{cls.__group__}/{cls.__version__}"
         actual_api_version = json_data.get("apiVersion")
         actual_kind = json_data.get("kind")
@@ -237,41 +270,55 @@ class KubeResourceBase:
         if actual_kind != cls.__name__:
             raise ValueError(f"Invalid kind: {actual_kind} (expected {cls.__name__})")
 
-        # Process metadata
-        metadata = json_data.get("metadata", {})
-        inputs = {ObjectMeta_attribute_map.get(k, k): v for k, v in metadata.items()}
-        meta = V1ObjectMeta(**inputs)
-
-        # Process spec
-        spec_data = {
-            safe_to_snake_case(k, cls, "spec"): v
-            for k, v in json_data.get("spec", {}).items()
+    @classmethod
+    def _process_metadata(cls, metadata_data):
+        inputs = {
+            ObjectMeta_attribute_map.get(k, k): v for k, v in metadata_data.items()
         }
-        ins = cls(spec=spec_data)
+        return V1ObjectMeta(**inputs)
 
-        # Attach raw JSON and parsed metadata
+    @classmethod
+    def _process_spec(cls, spec_data):
+        spec_cls = get_attr_class(cls, "spec")
+        if spec_cls is None:
+            return spec_data
+        return apischema_deserialize(
+            spec_cls,
+            spec_data,
+            aliaser=to_camel_case if getattr(cls, "__camel_case__", True) else None,
+        )
+
+    @classmethod
+    def _process_status(cls, status_data):
+        status_cls = get_attr_class(cls, "status")
+        if not status_cls:
+            return status_data
+        return apischema_deserialize(
+            status_cls,
+            status_data,
+            aliaser=to_camel_case if getattr(cls, "__camel_case__", True) else None,
+        )
+
+    @classmethod
+    def from_json(cls, json_data: dict):
+        """Instantiate the class from JSON data fetched from Kubernetes.
+
+        :param json_data: The CR JSON returned from Kubernetes API.
+        :type json_data: Dict
+        :returns: Instantiated cls with the data from json_data.
+        :rtype: cls
+        """
+        cls._validate_api_version_and_kind(json_data)
+
+        metadata = cls._process_metadata(json_data.get("metadata", {}))
+        spec = cls._process_spec(json_data.get("spec", {}))
+
+        ins = cls(spec=spec)
         ins.json = json_data
-        ins.metadata = meta
+        ins.metadata = metadata
 
-        # Process status if present
         if "status" in json_data:
-            status_data = {
-                to_snake_case(k): v for k, v in json_data.get("status", {}).items()
-            }
-
-            # Different handling strategies depending on what's available:
-            # 1. If the instance has a status_class attribute, use it to instantiate status
-            if hasattr(cls, "status_class"):
-                ins.status = cls.status_class(**status_data)
-            # 2. If instance already has a status attribute, update it
-            elif hasattr(ins, "status"):
-                if isinstance(ins.status, dict):
-                    ins.status.update(status_data)
-                else:
-                    ins.status = status_data
-            # 3. Otherwise just attach the status dict
-            else:
-                ins.status = status_data
+            ins.status = cls._process_status(json_data["status"])
 
         return ins
 
@@ -437,8 +484,8 @@ class KubeResourceBase:
         k8s_client = get_k8s_client(k8s_client)
         api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
         body_data = self.serialize(name=name, metadata=metadata)
-        print(f"Creating {self.__class__.__name__} resource in namespace '{namespace}'")
-        print(f"Resource data: {body_data}")
+        # print(f"Creating {self.__class__.__name__} resource in namespace '{namespace}'")
+        # print(f"Resource data: {body_data}")
         resp = api_instance.create_namespaced_custom_object(
             group=self.__group__,
             namespace=namespace,
