@@ -194,6 +194,15 @@ class KubeResourceBase:
         return getattr(cls, "__plural__", f"{cls.singular()}s")
 
     @classmethod
+    def kind(cls):
+        """Return the kind of the CRD.
+
+        Uses the `__kind__` dunder attribute if defined, otherwise
+        defaults to the class name.
+        """
+        return getattr(cls, "__kind__", cls.__name__)
+
+    @classmethod
     def crd_schema_dict(cls):
         """Return cls serialized as a Kubernetes CRD schema dict.
 
@@ -213,7 +222,7 @@ class KubeResourceBase:
                 "names": {
                     "singular": cls.singular(),
                     "plural": cls.plural(),
-                    "kind": cls.__name__,
+                    "kind": cls.kind(),
                     "shortNames": getattr(cls, "__shortnames__", []),
                 },
                 "versions": [
@@ -267,8 +276,8 @@ class KubeResourceBase:
                 f"Invalid apiVersion: {actual_api_version} (expected {expected_api_version})"
             )
 
-        if actual_kind != cls.__name__:
-            raise ValueError(f"Invalid kind: {actual_kind} (expected {cls.__name__})")
+        if actual_kind != cls.kind():
+            raise ValueError(f"Invalid kind: {actual_kind} (expected {cls.kind()})")
 
     @classmethod
     def _process_metadata(cls, metadata_data):
@@ -455,7 +464,6 @@ class KubeResourceBase:
 
         # Generate a default name if one isn't provided
         if name is None:
-            # name = (self.__class__.__name__.lower() + "-" + str(id(self))[-8:]).lower()
             name = self.generate_resource_name(prefix=self.singular())
 
         # Start with basic required metadata
@@ -466,15 +474,15 @@ class KubeResourceBase:
             resource_metadata.update(metadata)
 
         return {
-            "kind": self.__class__.__name__,
+            "kind": self.kind(),
             "apiVersion": f"{self.__group__}/{self.__version__}",
             **apischema_serialize(self, aliaser=to_camel_case if use_camel else None),
             "metadata": resource_metadata,
-            # "status": getattr(self, "status", None),
         }
 
-    def save(self, k8s_client=None, namespace="default", name=None, metadata=None):
-        """Save the instance of this class as a K8s custom resource.
+    def create(self, k8s_client=None, namespace="default", name=None, metadata=None):
+        """Add the instance of this class as a K8s custom resource if it does not exists.
+        To update an existing resource, use the `save` method.
 
         :param k8s_client: Kubernetes API client
         :param namespace: Namespace to create the resource in
@@ -484,8 +492,6 @@ class KubeResourceBase:
         k8s_client = get_k8s_client(k8s_client)
         api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
         body_data = self.serialize(name=name, metadata=metadata)
-        # print(f"Creating {self.__class__.__name__} resource in namespace '{namespace}'")
-        # print(f"Resource data: {body_data}")
         resp = api_instance.create_namespaced_custom_object(
             group=self.__group__,
             namespace=namespace,
@@ -495,10 +501,10 @@ class KubeResourceBase:
         )
         return resp
 
-    async def async_save(
+    async def async_create(
         self, k8s_client=None, namespace="default", name=None, metadata=None
     ):
-        """Save the instance of this class as a K8s custom resource asynchronously."""
+        """Add the instance of this class as a K8s custom resource asynchronously."""
         from kubernetes_asyncio import client
 
         k8s_client = await get_k8s_async_client(k8s_client)
@@ -509,6 +515,118 @@ class KubeResourceBase:
             version=self.__version__,
             plural=self.plural(),
             body=self.serialize(name=name, metadata=metadata),
+        )
+        return resp
+
+    def save(
+        self,
+        k8s_client=None,
+        namespace="default",
+        name=None,
+        metadata=None,
+        field_manager="my-operator-default-fm",
+    ):
+        """Save the instance of this class as a K8s custom resource using Server-Side Apply.
+
+        :param k8s_client: Kubernetes API client
+        :param namespace: Namespace to create/update the resource in
+        :param name: Optional name for the resource (if not set, taken from instance or metadata)
+        :param metadata: Optional additional metadata to merge into the object's metadata
+        :param field_manager: The name of the field manager for Server-Side Apply.
+                              It's good practice to make this specific to your operator/controller.
+        """
+
+        k8s_client = get_k8s_client(k8s_client)  # Your helper to get a client
+        k8s_client.set_default_header("Content-Type", "application/apply-patch+yaml")
+        api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
+
+        # Serialize the full desired state.
+        # The `name` parameter here helps ensure body_data['metadata']['name'] is set.
+        body_data = self.serialize(name=name, metadata=metadata)
+
+        # Ensure the name is set in the body_data
+        if name and (
+            "metadata" not in body_data or "name" not in body_data["metadata"]
+        ):
+            if "metadata" not in body_data:
+                body_data["metadata"] = {}
+            body_data["metadata"]["name"] = name
+
+        resource_name = body_data.get("metadata", {}).get("name")
+        if not resource_name:
+            raise ValueError(
+                "Resource name must be present in the serialized body's metadata for Server-Side Apply."
+            )
+
+        # For SSA, resourceVersion should NOT be in the body.
+        if "metadata" in body_data and "resourceVersion" in body_data["metadata"]:
+            del body_data["metadata"]["resourceVersion"]
+
+        resp = api_instance.patch_namespaced_custom_object(
+            group=self.__group__,
+            version=self.__version__,
+            namespace=namespace,
+            plural=self.plural(),
+            name=resource_name,  # Name from the body's metadata
+            body=json.dumps(body_data),
+            field_manager=field_manager,
+            force=True,
+        )
+        return resp
+
+    async def async_save(
+        self,
+        k8s_client=None,
+        namespace="default",
+        name=None,
+        metadata=None,
+        field_manager="my-operator-default-fm",
+    ):
+        """Save the instance of this class as a K8s custom resource asynchronously using Server-Side Apply.
+
+        :param k8s_client: Kubernetes API client (async)
+        :param namespace: Namespace to create/update the resource in
+        :param name: Optional name for the resource (if not set, taken from instance or metadata)
+        :param metadata: Optional additional metadata to merge into the object's metadata
+        :param field_manager: The name of the field manager for Server-Side Apply.
+        """
+        from kubernetes_asyncio import (
+            client as async_client,
+        )
+
+        k8s_client = await get_k8s_async_client(k8s_client)
+        k8s_client.set_default_header("Content-Type", "application/apply-patch+yaml")
+
+        api_instance = async_client.CustomObjectsApi(k8s_client)
+
+        body_data = self.serialize(name=name, metadata=metadata)
+
+        # Ensure the name is set in the body_data
+        if name and (
+            "metadata" not in body_data or "name" not in body_data["metadata"]
+        ):
+            if "metadata" not in body_data:
+                body_data["metadata"] = {}
+            body_data["metadata"]["name"] = name
+
+        resource_name = body_data.get("metadata", {}).get("name")
+        if not resource_name:
+            raise ValueError(
+                "Resource name must be present in the serialized body's metadata for Server-Side Apply."
+            )
+
+        if "metadata" in body_data and "resourceVersion" in body_data["metadata"]:
+            del body_data["metadata"]["resourceVersion"]
+
+        resp = await api_instance.patch_namespaced_custom_object(
+            group=self.__group__,
+            version=self.__version__,
+            namespace=namespace,
+            plural=self.plural(),
+            name=resource_name,
+            body=json.dumps(body_data),
+            field_manager=field_manager,
+            force=True,
         )
         return resp
 
@@ -547,7 +665,7 @@ class KubeResourceBase:
 
         return f"{prefix}-{hash_suffix}"
 
-    def update_status(self, k8s_client=None, namespace="default"):
+    def update_status(self, k8s_client=None, name=None, namespace="default"):
         """Update only the status subresource of this custom resource.
 
         :param k8s_client: Kubernetes API client
@@ -558,7 +676,9 @@ class KubeResourceBase:
                 "Cannot update status: no status field exists on this object"
             )
 
-        if not hasattr(self, "metadata") or not hasattr(self.metadata, "name"):
+        # Ensure the name is set in the object's metadata
+        resource_name = self.ensure_resource_name(name=name)
+        if not resource_name:
             raise ValueError(
                 "Cannot update status: resource must have a name in metadata"
             )
@@ -591,11 +711,13 @@ class KubeResourceBase:
             version=self.__version__,
             namespace=namespace,
             plural=self.plural(),
-            name=self.metadata.name,
+            name=resource_name,
             body=status_obj,
         )
 
-    async def async_update_status(self, k8s_client=None, namespace="default"):
+    async def async_update_status(
+        self, k8s_client=None, name=None, namespace="default"
+    ):
         """Update only the status subresource of this custom resource asynchronously."""
         from kubernetes_asyncio import client
 
@@ -604,7 +726,9 @@ class KubeResourceBase:
                 "Cannot update status: no status field exists on this object"
             )
 
-        if not hasattr(self, "metadata") or not hasattr(self.metadata, "name"):
+        # Ensure the name is set in the object's metadata
+        resource_name = self.ensure_resource_name(name=name)
+        if not resource_name:
             raise ValueError(
                 "Cannot update status: resource must have a name in metadata"
             )
@@ -640,3 +764,37 @@ class KubeResourceBase:
             name=self.metadata.name,
             body=status_obj,
         )
+
+    def ensure_resource_name(self, name=None):
+        """
+        Ensures the resource has a name in its metadata.
+        Returns the resource name.
+
+        :param name: Optional name to set if metadata doesn't have one
+        :return: The name of the resource
+        :raises: ValueError if name cannot be determined or set
+        """
+        # Normalize metadata to a plain dict
+        raw_meta = getattr(self, "metadata", None)
+        is_dict_style = True
+        if isinstance(raw_meta, V1ObjectMeta):
+            meta_dict = raw_meta.to_dict()
+            is_dict_style = False
+        elif isinstance(raw_meta, dict):
+            meta_dict = raw_meta.copy()
+        else:
+            meta_dict = {}
+
+        # Inject the name if provided and missing
+        if name:
+            meta_dict.setdefault("name", name)
+
+        # Validate
+        resource_name = meta_dict.get("name")
+        if not resource_name:
+            return None
+
+        # Write back either as dict or as V1ObjectMeta, depending on the API client
+        self.metadata = meta_dict if is_dict_style else V1ObjectMeta(**meta_dict)
+
+        return resource_name
