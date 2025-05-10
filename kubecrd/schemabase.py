@@ -665,11 +665,26 @@ class KubeResourceBase:
 
         return f"{prefix}-{hash_suffix}"
 
-    def update_status(self, k8s_client=None, name=None, namespace="default"):
+    def update_status(
+        self, k8s_client=None, name=None, namespace="default", patch_operations=None
+    ):
         """Update only the status subresource of this custom resource.
 
         :param k8s_client: Kubernetes API client
+        :type k8s_client: kubernetes.client.api_client.ApiClient
+        :param name: Optional name for the resource
+        :type name: str
+        :raises ValueError: If the resource name is not set in metadata
         :param namespace: Namespace where the resource exists
+        :type namespace: str
+        :param patch_operations: Optional patch operations to apply
+            e.g., If current status is {"conditions": [{"type": "Ready", "status": "True"}], "message": "Old message"}
+                patch_operations = [
+                    {"op": "replace", "path": "/message", "value": "New critical message"},
+                    {"op": "add", "path": "/conditions/-", "value": {"type": "Degraded", "status": "True"}} # Adds to end of conditions array
+                ]
+        :type patch_operations: dict
+        :raises ValueError: If the status field does not exist
         """
         if not hasattr(self, "status"):
             raise ValueError(
@@ -684,6 +699,21 @@ class KubeResourceBase:
             )
 
         k8s_client = get_k8s_client(k8s_client)
+
+        # If batch_operations is provided, we need to handle it differently
+        if patch_operations:
+            k8s_client.set_default_header("Content-Type", "application/json-patch+json")
+            api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
+            api_instance.patch_namespaced_custom_object_status(
+                group=self.__group__,
+                version=self.__version__,
+                namespace=namespace,
+                plural=self.plural(),
+                name=resource_name,
+                body=patch_operations,
+            )
+            return
+
         api_instance = kubernetes.client.CustomObjectsApi(k8s_client)
 
         # Get status data, handling different status types
@@ -716,7 +746,7 @@ class KubeResourceBase:
         )
 
     async def async_update_status(
-        self, k8s_client=None, name=None, namespace="default"
+        self, k8s_client=None, name=None, namespace="default", patch_operations=None
     ):
         """Update only the status subresource of this custom resource asynchronously."""
         from kubernetes_asyncio import client
@@ -734,8 +764,21 @@ class KubeResourceBase:
             )
 
         k8s_client = await get_k8s_async_client(k8s_client)
-        api_instance = client.CustomObjectsApi(k8s_client)
+        # If batch_operations is provided, we need to handle it differently
+        if patch_operations:
+            k8s_client.set_default_header("Content-Type", "application/json-patch+json")
+            api_instance = client.CustomObjectsApi(k8s_client)
+            await api_instance.patch_namespaced_custom_object_status(
+                group=self.__group__,
+                version=self.__version__,
+                namespace=namespace,
+                plural=self.plural(),
+                name=resource_name,
+                body=patch_operations,
+            )
+            return
 
+        api_instance = client.CustomObjectsApi(k8s_client)
         # Get status data, handling different status types
         if hasattr(self.status, "serialize"):
             status_data = self.status.serialize()
@@ -761,7 +804,7 @@ class KubeResourceBase:
             version=self.__version__,
             namespace=namespace,
             plural=self.plural(),
-            name=self.metadata.name,
+            name=resource_name,
             body=status_obj,
         )
 
