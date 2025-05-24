@@ -841,3 +841,131 @@ class KubeResourceBase:
         self.metadata = meta_dict if is_dict_style else V1ObjectMeta(**meta_dict)
 
         return resource_name
+
+    # Add these methods to the KubeResourceBase class
+
+    @classmethod
+    def get(cls, name, namespace="default", k8s_client=None):
+        """
+        Retrieve a specific instance of the custom resource.
+
+        Args:
+            name: Name of the resource to retrieve
+            namespace: Kubernetes namespace (defaults to 'default')
+            k8s_client: Instantiated Kubernetes API Client (optional)
+
+        Returns:
+            An instance of the class populated with the resource data
+        """
+        k8s_client = get_k8s_client(k8s_client)
+
+        api_instance = k8s_sync_client.CustomObjectsApi(k8s_client)
+        response = api_instance.get_namespaced_custom_object(
+            group=cls.__group__,
+            version=cls.__version__,
+            namespace=namespace,
+            plural=cls.plural(),
+            name=name,
+        )
+
+        return cls.from_json(response)
+
+    @classmethod
+    async def async_get(cls, name, namespace="default", k8s_client=None):
+        """
+        Asynchronously retrieve a specific instance of the custom resource.
+
+        Args:
+            name: Name of the resource to retrieve
+            namespace: Kubernetes namespace (defaults to 'default')
+            k8s_client: Instantiated async Kubernetes API Client (optional)
+
+        Returns:
+            An instance of the class populated with the resource data
+        """
+        k8s_client = await get_k8s_async_client(k8s_client)
+
+        api_instance = k8s_async_client.CustomObjectsApi(k8s_client)
+        response = await api_instance.get_namespaced_custom_object(
+            group=cls.__group__,
+            version=cls.__version__,
+            namespace=namespace,
+            plural=cls.plural(),
+            name=name,
+        )
+
+        return cls.from_json(response)
+
+    @classmethod
+    def list(cls, namespace="default", label_selector=None, k8s_client=None):
+        """
+        List all instances of the custom resource.
+
+        Args:
+            namespace: Kubernetes namespace (defaults to 'default')
+            label_selector: Label selector string to filter resources
+            k8s_client: Instantiated Kubernetes API Client (optional)
+
+        Returns:
+            A list of instances of the class
+        """
+        k8s_client = get_k8s_client(k8s_client)
+
+        api_instance = k8s_sync_client.CustomObjectsApi(k8s_client)
+        response = api_instance.list_namespaced_custom_object(
+            group=cls.__group__,
+            version=cls.__version__,
+            namespace=namespace,
+            plural=cls.plural(),
+            label_selector=label_selector,
+        )
+
+        return [cls.from_json(item) for item in response.get("items", [])]
+
+    def delete(self, namespace, name, k8s_client=None):
+        """
+        Delete a specific instance of the custom resource.
+
+        Args:
+            namespace: Kubernetes namespace
+            name: Name of the resource to delete
+            k8s_client: Instantiated Kubernetes API Client (optional)
+
+        Returns:
+            The API response from the delete operation
+        """
+        k8s_client = get_k8s_client(k8s_client)
+
+        api_instance = k8s_sync_client.CustomObjectsApi(k8s_client)
+
+        return api_instance.delete_namespaced_custom_object(
+            group=self.__group__,
+            version=self.__version__,
+            namespace=namespace,
+            plural=self.plural(),
+            name=name,
+        )
+
+    async def async_delete(self, namespace, name, k8s_client=None):
+        """
+        Asynchronously delete a specific instance of the custom resource.
+
+        Args:
+            namespace: Kubernetes namespace
+            name: Name of the resource to delete
+            k8s_client: Instantiated async Kubernetes API Client (optional)
+
+        Returns:
+            The API response from the delete operation
+        """
+        k8s_client = await get_k8s_async_client(k8s_client)
+
+        api_instance = k8s_async_client.CustomObjectsApi(k8s_client)
+
+        return await api_instance.delete_namespaced_custom_object(
+            group=self.__group__,
+            version=self.__version__,
+            namespace=namespace,
+            plural=self.plural(),
+            name=name,
+        )
