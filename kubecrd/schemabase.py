@@ -568,7 +568,7 @@ class KubeResourceBase:
             namespace=namespace,
             plural=self.plural(),
             name=resource_name,  # Name from the body's metadata
-            body=json.dumps(body_data),
+            body=body_data,
             field_manager=field_manager,
             force=True,
         )
@@ -624,7 +624,7 @@ class KubeResourceBase:
             namespace=namespace,
             plural=self.plural(),
             name=resource_name,
-            body=json.dumps(body_data),
+            body=body_data,
             field_manager=field_manager,
             force=True,
         )
