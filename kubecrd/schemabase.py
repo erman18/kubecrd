@@ -568,6 +568,7 @@ class KubeResourceBase:
             yaml.load(json.dumps(body_data), Loader=yaml.Loader),
             Dumper=yaml.Dumper,
         )
+        print(f"Body data for patching: \n{body_data_obj}")
 
         resp = api_instance.patch_namespaced_custom_object(
             group=self.__group__,
