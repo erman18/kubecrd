@@ -562,13 +562,20 @@ class KubeResourceBase:
         if "metadata" in body_data and "resourceVersion" in body_data["metadata"]:
             del body_data["metadata"]["resourceVersion"]
 
+        # For Server-Side Apply, we need to convert the body_data to YAML.
+        # Python Obj -> JSON -> pure Python primitives -> YAML String
+        body_data_obj = yaml.dump(
+            yaml.load(json.dumps(body_data), Loader=yaml.Loader),
+            Dumper=yaml.Dumper,
+        )
+
         resp = api_instance.patch_namespaced_custom_object(
             group=self.__group__,
             version=self.__version__,
             namespace=namespace,
             plural=self.plural(),
             name=resource_name,  # Name from the body's metadata
-            body=body_data,
+            body=body_data_obj,
             field_manager=field_manager,
             force=True,
         )
@@ -618,13 +625,18 @@ class KubeResourceBase:
         if "metadata" in body_data and "resourceVersion" in body_data["metadata"]:
             del body_data["metadata"]["resourceVersion"]
 
+        body_data_obj = yaml.dump(
+            yaml.load(json.dumps(body_data), Loader=yaml.Loader),
+            Dumper=yaml.Dumper,
+        )
+
         resp = await api_instance.patch_namespaced_custom_object(
             group=self.__group__,
             version=self.__version__,
             namespace=namespace,
             plural=self.plural(),
             name=resource_name,
-            body=body_data,
+            body=body_data_obj,
             field_manager=field_manager,
             force=True,
         )
