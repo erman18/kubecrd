@@ -599,20 +599,29 @@ class KubeResourceBase:
         # Convert directly to YAML without the JSON intermediate step
         clean_body_data = self._clean_for_k8s_serialization(body_data)
 
+        # Convert to YAML with proper formatting
         try:
             body_data_obj = yaml.dump(
                 clean_body_data,
-                default_flow_style=False,
+                default_flow_style=False,  # Use block style for better readability
+                indent=2,  # Proper indentation
+                width=1000,  # Prevent line wrapping
                 allow_unicode=True,
                 sort_keys=False,  # Preserve order
             )
+            print(f"[kubecrd] Body data for patching:\n{body_data_obj}")
+
+            # Validate the YAML by trying to parse it back
+            parsed_back = yaml.safe_load(body_data_obj)
+            if not isinstance(parsed_back, dict):
+                raise ValueError(
+                    f"YAML parsing validation failed: got {type(parsed_back)}"
+                )
 
         except Exception as e:
             print(f"[kubecrd] Error serializing to YAML: {e}")
-            print(f"[kubecrd] Clean body data: {clean_body_data}")
+            print(f"[kubecrd] Clean body data: {json.dumps(clean_body_data, indent=2)}")
             raise
-
-        print(f"[kubecrd] Body data for patching:\n{body_data_obj}")
 
         resp = api_instance.patch_namespaced_custom_object(
             group=self.__group__,
