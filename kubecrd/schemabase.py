@@ -520,31 +520,6 @@ class KubeResourceBase:
         )
         return resp
 
-    def _clean_for_k8s_serialization(self, obj):
-        """
-        Clean an object for Kubernetes serialization by converting problematic types.
-        """
-        if isinstance(obj, Enum):
-            return obj.value
-        elif isinstance(obj, datetime.datetime):
-            return obj.isoformat()
-        elif isinstance(obj, dict):
-            return {
-                key: self._clean_for_k8s_serialization(value)
-                for key, value in obj.items()
-            }
-        elif isinstance(obj, list):
-            return [self._clean_for_k8s_serialization(item) for item in obj]
-        elif isinstance(obj, (int, float, bool)):
-            return obj
-        elif isinstance(obj, str):
-            return obj
-        elif obj is None:
-            return obj
-        else:
-            # For any other type, try to convert to string
-            return str(obj)
-
     def save(
         self,
         k8s_client=None,
@@ -589,39 +564,12 @@ class KubeResourceBase:
         if "metadata" in body_data and "resourceVersion" in body_data["metadata"]:
             del body_data["metadata"]["resourceVersion"]
 
-        # # For Server-Side Apply, we need to convert the body_data to YAML.
-        # # Python Obj -> JSON -> pure Python primitives -> YAML String
-        # body_data_obj = yaml.dump(
-        #     yaml.load(json.dumps(body_data), Loader=yaml.Loader),
-        #     Dumper=yaml.Dumper,
-        # )
-
-        # Convert directly to YAML without the JSON intermediate step
-        clean_body_data = self._clean_for_k8s_serialization(body_data)
-
-        # Convert to YAML with proper formatting
-        try:
-            body_data_obj = yaml.dump(
-                clean_body_data,
-                default_flow_style=False,  # Use block style for better readability
-                indent=2,  # Proper indentation
-                width=1000,  # Prevent line wrapping
-                allow_unicode=True,
-                sort_keys=False,  # Preserve order
-            )
-            print(f"[kubecrd] Body data for patching:\n{body_data_obj}")
-
-            # Validate the YAML by trying to parse it back
-            parsed_back = yaml.safe_load(body_data_obj)
-            if not isinstance(parsed_back, dict):
-                raise ValueError(
-                    f"YAML parsing validation failed: got {type(parsed_back)}"
-                )
-
-        except Exception as e:
-            print(f"[kubecrd] Error serializing to YAML: {e}")
-            print(f"[kubecrd] Clean body data: {json.dumps(clean_body_data, indent=2)}")
-            raise
+        # For Server-Side Apply, we need to convert the body_data to YAML.
+        # Python Obj -> JSON -> pure Python primitives -> YAML String
+        body_data_obj = yaml.dump(
+            yaml.load(json.dumps(body_data), Loader=yaml.Loader),
+            Dumper=yaml.Dumper,
+        )
 
         resp = api_instance.patch_namespaced_custom_object(
             group=self.__group__,
