@@ -134,7 +134,7 @@ async def get_k8s_async_client(provided=None) -> k8s_async_client.ApiClient:
     if provided:
         return provided
     try:
-        await async_config.load_incluster_config()
+        async_config.load_incluster_config()
     except async_config.ConfigException:
         await async_config.load_kube_config()
     return k8s_async_client.ApiClient()
