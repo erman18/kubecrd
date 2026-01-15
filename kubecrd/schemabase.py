@@ -587,9 +587,10 @@ class KubeResourceBase:
         )
 
         # If status exists and update_status is True, update the status subresource
+        # Note: Don't pass k8s_client as it has Content-Type set for SSA which is incompatible
+        # with status patch. Let update_status() create a fresh client.
         if update_status and hasattr(self, "status") and self.status is not None:
             self.update_status(
-                k8s_client=k8s_client,
                 name=resource_name,
                 namespace=namespace,
             )
@@ -661,9 +662,10 @@ class KubeResourceBase:
         )
 
         # If status exists and update_status is True, update the status subresource
+        # Note: Don't pass k8s_client as it has Content-Type set for SSA which is incompatible
+        # with status patch. Let async_update_status() create a fresh client.
         if update_status and hasattr(self, "status") and self.status is not None:
             await self.async_update_status(
-                k8s_client=k8s_client,
                 name=resource_name,
                 namespace=namespace,
             )
