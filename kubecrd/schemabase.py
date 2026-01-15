@@ -527,6 +527,7 @@ class KubeResourceBase:
         name=None,
         metadata=None,
         field_manager="my-operator-default-fm",
+        update_status=False,
     ):
         """Save the instance of this class as a K8s custom resource using Server-Side Apply.
 
@@ -536,6 +537,9 @@ class KubeResourceBase:
         :param metadata: Optional additional metadata to merge into the object's metadata
         :param field_manager: The name of the field manager for Server-Side Apply.
                               It's good practice to make this specific to your operator/controller.
+        :param update_status: If True and status exists, also update the status subresource.
+                              Note: Kubernetes ignores status in the main resource endpoint when
+                              status is defined as a subresource, so this makes a separate API call.
         """
 
         k8s_client = get_k8s_client(k8s_client)  # Your helper to get a client
@@ -581,6 +585,15 @@ class KubeResourceBase:
             field_manager=field_manager,
             force=True,
         )
+
+        # If status exists and update_status is True, update the status subresource
+        if update_status and hasattr(self, "status") and self.status is not None:
+            self.update_status(
+                k8s_client=k8s_client,
+                name=resource_name,
+                namespace=namespace,
+            )
+
         return resp
 
     async def async_save(
@@ -590,6 +603,7 @@ class KubeResourceBase:
         name=None,
         metadata=None,
         field_manager="my-operator-default-fm",
+        update_status=False,
     ):
         """Save the instance of this class as a K8s custom resource asynchronously using Server-Side Apply.
 
@@ -598,6 +612,9 @@ class KubeResourceBase:
         :param name: Optional name for the resource (if not set, taken from instance or metadata)
         :param metadata: Optional additional metadata to merge into the object's metadata
         :param field_manager: The name of the field manager for Server-Side Apply.
+        :param update_status: If True and status exists, also update the status subresource.
+                              Note: Kubernetes ignores status in the main resource endpoint when
+                              status is defined as a subresource, so this makes a separate API call.
         """
         from kubernetes_asyncio import (
             client as async_client,
@@ -642,6 +659,15 @@ class KubeResourceBase:
             field_manager=field_manager,
             force=True,
         )
+
+        # If status exists and update_status is True, update the status subresource
+        if update_status and hasattr(self, "status") and self.status is not None:
+            await self.async_update_status(
+                k8s_client=k8s_client,
+                name=resource_name,
+                namespace=namespace,
+            )
+
         return resp
 
     def generate_resource_name(self, prefix=None, include_hash=True):
